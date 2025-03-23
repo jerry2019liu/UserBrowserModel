@@ -1,0 +1,175 @@
+# define the CICD pipeline to deploy the above model in AWS with sagemaker 
+
+# cicd-pipeline.yaml
+
+# --- AWS Configuration (Replace with your values) ---
+Parameters:
+  AWS_REGION:
+    Type: String
+    Default: "us-east-1"  # Your AWS region
+  SAGEMAKER_ROLE_ARN:
+    Type: String
+    Description: "SageMaker Execution Role ARN"
+  LOG_GROUP_NAME:
+    Type: String
+    Description: "CloudWatch Log Group Name"
+  LOG_STREAM_PREFIX:
+    Type: String
+    Default: "" # Optional
+  S3_BUCKET:
+    Type: String
+    Description: "S3 Bucket for model artifacts"
+  IMAGE_URI:
+    Type: String
+    Description: "ECR Image URI for the SageMaker model"
+
+Resources:
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: UserBrowserModelPipeline
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Bucket: !Ref S3_BUCKET
+          Location: codepipeline-artifacts # Optional: a subfolder
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceCode
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit # Or GitHub, etc.
+                Version: "1"
+              Configuration:
+                RepositoryName: UserBrowserModelRepo # Your CodeCommit repository
+                BranchName: main
+              Outputs:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildModel
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              Outputs:
+                - Name: BuildOutput
+        - Name: Deploy
+          Actions:
+            - Name: DeployModel
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: SageMaker
+                Version: "1"
+              Configuration:
+                EndpointConfigName: UserBrowserModelEndpointConfig
+                EndpointName: UserBrowserModelEndpoint
+                CreateModelArtifacts: !Sub "s3://${S3_BUCKET}/model-artifacts/model.tar.gz" # Adjust path based on your CodeBuild output
+                CreateModelImageUri: !Ref IMAGE_URI
+                CreateModelRoleArn: !Ref SAGEMAKER_ROLE_ARN
+                UpdateEndpoint: true
+              InputArtifacts:
+                - Name: BuildOutput
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: UserBrowserModelBuild
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Ref S3_BUCKET
+        Name: model-artifacts
+        Packaging: ZIP
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0 # Or a custom image
+      Source:
+        Type: CODEPIPELINE
+      BuildSpec: |
+        version: 0.2
+        phases:
+          build:
+            commands:
+              - echo "Building the model..."
+              - pip install pandas boto3 scikit-learn # Install model dependencies
+              - python model.py # Run your model training/creation script
+              - tar czvf model.tar.gz model.pkl # Package the model
+        artifacts:
+          files:
+            - model.tar.gz
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - codebuild:*
+                  - codepipeline:*
+                  - iam:PassRole
+                  - sagemaker:*
+                Resource: "*"
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - logs:*
+                  - sagemaker:*
+                Resource: "*"
+
+# --- SageMaker Endpoint Configuration (Optional, can be created separately) ---
+  UserBrowserModelEndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: UserBrowserModelEndpointConfig
+      ProductionVariants:
+        - InitialInstanceCount: 1
+          InitialVariantWeight: 1
+          InstanceType: ml.m5.large
+          ModelName: UserBrowserModelEndpoint # Must match the endpoint name used in deployment.
+          VariantName: AllTraffic
+
+# --- SageMaker Endpoint (Optional, can be created separately) ---
+  UserBrowserModelEndpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointConfigName: UserBrowserModelEndpointConfig
+      EndpointName: UserBrowserModelEndpoint
